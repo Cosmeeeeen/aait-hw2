@@ -11,6 +11,9 @@ In order to experiment with my pipeline, I created four scripts that need to be 
 
 Task 1 baseline : python script_task1_baseline.py --dataset=path_to_dataset.csv --train_img_labeled_dir=path_to_train_images --val_img_dir=path_to_val_images --model=resnet50 --optimizer=sgd
 
+Task 1 pseudo-labeling: python script_task1_pseudo_labeling.py --dataset=path_to_dataset.csv --train_img_labeled_dir=path_to_train_images_labeled --train_img_unlabeled_dir=path_to_train_images_unlabeled --val_img_dir=path_to_val_images --optimizer=sgd
+
 Task 2 baseline: python script_task2_baseline.py --dataset=path_to_dataset.csv --train_img_labeled_dir=path_to_train_images --val_img_dir=path_to_val_images --model=resnet50 --optimizer=sgd
 
+Task 2 ensemble: python script_task2_ensemble.py --dataset=path_to_dataset.csv --train_img_labeled_dir=path_to_train_images --val_img_dir=path_to_val_images --optimizer=sgd
 
