@@ -106,7 +106,8 @@ def train_model(model, train_dataloader, criterion, optimizer, epochs, device):
 
         epoch_loss = total_loss / len(train_dataloader)
         epoch_acc = 100 * correct / total
-        print(f'Epoch {epoch+1}/{epochs}, Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.2f}%')
+        if epoch % 10 == 0:
+            print(f'Epoch {epoch+1}/{epochs}, Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.2f}%')
 
 def evaluate_model(model, dataloader, criterion, device):
     model.eval()
@@ -138,16 +139,58 @@ def evaluate_model(model, dataloader, criterion, device):
 
     return avg_loss, accuracy, precision, recall, f1
 
-def generate_pseudo_labels(model, dataloader):
-    model.eval()
+def evaluate_ensemble(models, dataloader, criterion, device):
+    for model in models:
+        model.eval()
+    
+    total_loss = 0
+    all_labels = []
+    all_preds = []
+
+    with torch.no_grad():
+        for images, labels, img_paths in dataloader:
+            images, labels = images.to(device), labels.to(device)
+            ensemble_outputs = torch.zeros(labels.size(0), 100).to(device)
+            #print(labels.size(0))
+            for model in models:
+                outputs = model(images)
+                ensemble_outputs += torch.softmax(outputs, dim=1)
+
+            ensemble_outputs /= len(models)
+            loss = criterion(ensemble_outputs, labels)
+            total_loss += loss.item()
+
+            _, predicted = torch.max(ensemble_outputs.data, 1)
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(predicted.cpu().numpy())
+            
+            
+    avg_loss = total_loss / len(dataloader)
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='weighted')
+    recall = recall_score(all_labels, all_preds, average='weighted')
+    f1 = f1_score(all_labels, all_preds, average='weighted')
+
+    return avg_loss, accuracy, precision, recall, f1
+
+
+def generate_pseudo_labels_ensemble(models, dataloader):
+    for model in models:
+        model.eval()
+
     pseudo_label_data = []
     with torch.no_grad():
         for images, img_paths in dataloader:
             images = images.to(mps_device)
-            outputs = model(images)
-            probs, predicted = torch.max(outputs, 1)
-            
-            
+
+            ensemble_outputs = torch.zeros(images.size(0), 100).to(mps_device)
+            for model in models:
+                outputs = model(images)
+                ensemble_outputs += torch.softmax(outputs, dim=1)
+            ensemble_outputs /= len(models)
+
+            _, predicted = torch.max(ensemble_outputs, 1)
+
             for img_path, label in zip(img_paths, predicted):
                 pseudo_label_data.append((img_path, label.item()))
 
@@ -162,14 +205,12 @@ def main(args):
     parser.add_argument('--dataset', type=str, required=True, help='Path to the dataset')
     parser.add_argument('--train_img_labeled_dir', type=str, required=True, help='Directory of labeled training images')
     parser.add_argument('--val_img_dir', type=str, required=True, help='Directory of validation images')
-    parser.add_argument('--model', type=str, choices=['resnet50', 'efficientnet_b0'], required=True, help='Model to use')
     parser.add_argument('--optimizer', type=str, choices=['sgd', 'adam'], required=True, help='Optimizer to use')
 
     args = parser.parse_args()
     train_annotation_file = args.dataset
     train_img_labeled_dir = args.train_img_labeled_dir
     val_img_dir = args.val_img_dir
-    model_name = args.model
     optimizer_choice = args.optimizer
     num_classes=100
 
@@ -185,8 +226,8 @@ def main(args):
     train_data, test_data = train_test_split(df, test_size=0.2, stratify=df['label'], random_state=42)
 
     transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(degrees=15),
+        transforms.RandomHorizontalFlip(), 
+        transforms.RandomRotation(degrees=15), 
         transforms.ToTensor(),
         transforms.ConvertImageDtype(torch.float),
 
@@ -201,24 +242,30 @@ def main(args):
     criterion = nn.CrossEntropyLoss()
 
     # Instantiate model based on command line argument
-    if model_name == 'resnet50':
-        model = CustomModel(num_classes=100, pretrained=True).to(mps_device)
-    elif model_name == 'efficientnet_b0':
-        model = efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
-        model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
-        model = model.to(mps_device)
-        
-
-    # Choose optimizer based on command line argument
-    if optimizer_choice == 'sgd':
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
-    elif optimizer_choice == 'adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
     
+    model1 = CustomModel(num_classes=100, pretrained=True).to(mps_device)
+    
+    model2 = efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
+    model2.classifier[1] = nn.Linear(model2.classifier[1].in_features, num_classes)
+    model2 = model2.to(mps_device)
 
-    # Train, evaluate, and generate pseudo labels
-    train_model(model, train_dataloader, criterion, optimizer, epochs=30, device=mps_device)
-    avg_loss, acc, prec, rec, f1 = evaluate_model(model, test_dataloader, criterion, mps_device)
+    model3 = models.mobilenet_v2(pretrained=True)
+    model3.classifier[1] = nn.Linear(model3.last_channel, num_classes)
+    model3 = model3.to(mps_device)
+
+    models_ensemble = [model1, model2, model3]
+    
+    for i, model in enumerate(models_ensemble):
+        print(f"Training model {i+1}/{len(models_ensemble)}")
+        # Choose optimizer based on command line argument
+        if optimizer_choice == 'sgd':
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+        elif optimizer_choice == 'adam':
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+        train_model(model, train_dataloader, criterion, optimizer, epochs=20, device=mps_device)
+
+    
+    avg_loss, acc, prec, rec, f1 = evaluate_ensemble(models_ensemble, test_dataloader, criterion, mps_device)
     print("Ensemble Results:")
     print("Average loss: ", avg_loss)
     print("Accuracy: ", acc*100)
@@ -229,7 +276,7 @@ def main(args):
     val_unlabeled_dataset = AAITDataset(None, val_img_dir, is_train=False, transform=transform)
     val_unlabeled_dataloader = DataLoader(val_unlabeled_dataset, batch_size=64, shuffle=False)
 
-    val_labels = generate_pseudo_labels(model, val_unlabeled_dataloader)
+    val_labels = generate_pseudo_labels_ensemble(models_ensemble, val_unlabeled_dataloader)
     val_labels['sample'] = val_labels['sample'].apply(lambda x: x.split('/')[-1])
 
     val_labels['sort_key'] = val_labels['sample'].str.extract('(\d+)').astype(int)
@@ -237,7 +284,7 @@ def main(args):
     val_labels.reset_index(inplace=True)
     val_labels.drop(columns=['sort_key','index'], inplace=True)
 
-    val_labels.to_csv('task2/baseline.csv', index=False)
+    val_labels.to_csv('task2/ensemble.csv', index=False)
 
 
 if __name__ == '__main__':

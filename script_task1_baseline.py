@@ -22,6 +22,8 @@ def get_state_dict(self, *args, **kwargs):
     return load_state_dict_from_url(self.url, *args, **kwargs)
 WeightsEnum.get_state_dict = get_state_dict
 
+mps_device = torch.device("mps")
+
 class AAITDataset(Dataset):
     def __init__(self, dataset, img_dir, is_train=True, transform=None, target_transform=None):
         self.is_train = is_train
@@ -183,8 +185,8 @@ def main(args):
     train_data, test_data = train_test_split(df, test_size=0.2, stratify=df['label'], random_state=42)
 
     transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(), # le decomentam ptr train
-        transforms.RandomRotation(degrees=15), # le decomentam ptr train
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(degrees=15),
         transforms.ToTensor(),
         transforms.ConvertImageDtype(torch.float),
 
@@ -194,7 +196,7 @@ def main(args):
     train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
     test_dataset = AAITDataset(test_data, train_img_labeled_dir, is_train=True, transform=transform)
-    test_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    test_dataloader = DataLoader(test_dataset, batch_size=64, shuffle=True)
 
     criterion = nn.CrossEntropyLoss()
 
@@ -211,12 +213,18 @@ def main(args):
     if optimizer_choice == 'sgd':
         optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
     elif optimizer_choice == 'adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
     
 
     # Train, evaluate, and generate pseudo labels
     train_model(model, train_dataloader, criterion, optimizer, epochs=30, device=mps_device)
     avg_loss, acc, prec, rec, f1 = evaluate_model(model, test_dataloader, criterion, mps_device)
+    print("Ensemble Results:")
+    print("Average loss: ", avg_loss)
+    print("Accuracy: ", acc*100)
+    print("Precision: ", prec*100)
+    print("Recall: ", rec*100)
+    print("F1 score: ", f1*100)
 
     val_unlabeled_dataset = AAITDataset(None, val_img_dir, is_train=False, transform=transform)
     val_unlabeled_dataloader = DataLoader(val_unlabeled_dataset, batch_size=64, shuffle=False)

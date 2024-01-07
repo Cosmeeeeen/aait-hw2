@@ -13,14 +13,7 @@ from tqdm import tqdm
 from PIL import Image
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.model_selection import train_test_split
-from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
-from torchvision.models._api import WeightsEnum
-from torch.hub import load_state_dict_from_url
-
-def get_state_dict(self, *args, **kwargs):
-    kwargs.pop("check_hash")
-    return load_state_dict_from_url(self.url, *args, **kwargs)
-WeightsEnum.get_state_dict = get_state_dict
+from torch.utils.data import ConcatDataset
 
 mps_device = torch.device("mps")
 
@@ -161,15 +154,15 @@ def main(args):
     parser = argparse.ArgumentParser(description="Train a model on a specified dataset with a given optimizer.")
     parser.add_argument('--dataset', type=str, required=True, help='Path to the dataset')
     parser.add_argument('--train_img_labeled_dir', type=str, required=True, help='Directory of labeled training images')
+    parser.add_argument('--train_img_unlabeled_dir', type=str, required=True, help='Directory of unlabeled training images')
     parser.add_argument('--val_img_dir', type=str, required=True, help='Directory of validation images')
-    parser.add_argument('--model', type=str, choices=['resnet50', 'efficientnet_b0'], required=True, help='Model to use')
     parser.add_argument('--optimizer', type=str, choices=['sgd', 'adam'], required=True, help='Optimizer to use')
 
     args = parser.parse_args()
     train_annotation_file = args.dataset
     train_img_labeled_dir = args.train_img_labeled_dir
+    train_img_unlabeled_dir = args.train_img_unlabeled_dir
     val_img_dir = args.val_img_dir
-    model_name = args.model
     optimizer_choice = args.optimizer
     num_classes=100
 
@@ -198,38 +191,51 @@ def main(args):
     test_dataset = AAITDataset(test_data, train_img_labeled_dir, is_train=True, transform=transform)
     test_dataloader = DataLoader(test_dataset, batch_size=64, shuffle=True)
 
+    train_unlabeled_dataset = AAITDataset(None, train_img_unlabeled_dir, is_train=False, transform=transform)
+    train_unlabeled_dataloader = DataLoader(train_unlabeled_dataset, batch_size=64, shuffle=True)
+
     criterion = nn.CrossEntropyLoss()
 
-    # Instantiate model based on command line argument
-    if model_name == 'resnet50':
-        model = CustomModel(num_classes=100, pretrained=True).to(mps_device)
-    elif model_name == 'efficientnet_b0':
-        model = efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
-        model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
-        model = model.to(mps_device)
+    teacher_model = CustomModel(num_classes=100, pretrained=True).to(mps_device)
+    student_model = CustomModel(num_classes=100, pretrained=True).to(mps_device)
         
 
     # Choose optimizer based on command line argument
     if optimizer_choice == 'sgd':
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+        optimizer = torch.optim.SGD(teacher_model.parameters(), lr=0.001, momentum=0.9)
     elif optimizer_choice == 'adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+        optimizer = torch.optim.Adam(teacher_model.parameters(), lr=0.0001)
     
 
     # Train, evaluate, and generate pseudo labels
-    train_model(model, train_dataloader, criterion, optimizer, epochs=30, device=mps_device)
-    avg_loss, acc, prec, rec, f1 = evaluate_model(model, test_dataloader, criterion, mps_device)
-    print("Ensemble Results:")
+    train_model(teacher_model, train_dataloader, criterion, optimizer, epochs=30, device=mps_device)
+    avg_loss, acc, prec, rec, f1 = evaluate_model(teacher_model, test_dataloader, criterion, mps_device)
+    print("Results:")
     print("Average loss: ", avg_loss)
     print("Accuracy: ", acc*100)
     print("Precision: ", prec*100)
     print("Recall: ", rec*100)
     print("F1 score: ", f1*100)
 
+    pseudo_labels = generate_pseudo_labels(teacher_model, train_unlabeled_dataloader)
+    train_annotation_file_un = 'annotations_pseudo.csv'
+    pseudo_labels.to_csv(train_annotation_file_un, index=False)
+
+    train_dataset = AAITDataset(df, train_img_labeled_dir, is_train=True, transform=transform)
+    train_dataset_un = AAITDataset(pseudo_labels, train_img_unlabeled_dir, is_train=True, transform=transform)
+    combined_dataset = ConcatDataset([train_dataset, train_dataset_un])
+    combined_dataloader = DataLoader(combined_dataset, batch_size=64, shuffle=True)
+    
+    if optimizer_choice == 'sgd':
+        optimizer = torch.optim.SGD(student_model.parameters(), lr=0.001, momentum=0.9)
+    elif optimizer_choice == 'adam':
+        optimizer = torch.optim.Adam(student_model.parameters(), lr=0.0001)
+    train_model(student_model, combined_dataloader, criterion, optimizer, epochs=20, device=mps_device)
+
     val_unlabeled_dataset = AAITDataset(None, val_img_dir, is_train=False, transform=transform)
     val_unlabeled_dataloader = DataLoader(val_unlabeled_dataset, batch_size=64, shuffle=False)
 
-    val_labels = generate_pseudo_labels(model, val_unlabeled_dataloader)
+    val_labels = generate_pseudo_labels(student_model, val_unlabeled_dataloader)
     val_labels['sample'] = val_labels['sample'].apply(lambda x: x.split('/')[-1])
 
     val_labels['sort_key'] = val_labels['sample'].str.extract('(\d+)').astype(int)
@@ -237,7 +243,7 @@ def main(args):
     val_labels.reset_index(inplace=True)
     val_labels.drop(columns=['sort_key','index'], inplace=True)
 
-    val_labels.to_csv('task2/baseline.csv', index=False)
+    val_labels.to_csv('task1/pseudo_labels.csv', index=False)
 
 
 if __name__ == '__main__':
